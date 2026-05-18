@@ -97,7 +97,7 @@ impl App {
         let (influencer, mode): (Box<dyn Influencer>, &'static str) = match shape {
             Some("sphere")   => (Box::new(Authored::new(AuthoredShape::Sphere)),  "sphere"),
             Some("shell")    => (Box::new(Authored::new(AuthoredShape::Shell)),   "shell"),
-            Some("a") | Some("letter-a") => (Box::new(Authored::new(AuthoredShape::LetterA)), "letter-a"),
+            Some("a") | Some("letter-a") | Some("letter") => (Box::new(Authored::new(AuthoredShape::LetterA)), "letter-a"),
             _                => (Box::new(GrayScott::new(dims)),                  "rd"),
         };
 
