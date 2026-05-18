@@ -23,31 +23,39 @@ use cell::CellGrid;
 use influencer::{gray_scott::GrayScott, Influencer};
 use rasterizer::Rasterizer;
 
-/// Grid dimensions for the current checkpoint.
-/// CP1: 8³ (512 cells, 1 active). CP2+: 8³ all active. 16³ and 32³ after CP6.
-const GRID: u32 = 8;
+// ---- Checkpoint constants ---------------------------------------------------
+//
+// Update GRID and CAMERA_DISTANCE together when scaling up.
+//   CP1/2:  8, 11.0   |  CP3+:  16, 22.0  |  CP6:  32, 42.0
+
+/// Grid dimension per axis. 16³ = 4096 cells for CP3.
+const GRID: u32 = 16;
 
 /// Center-to-center spacing between cells in world units.
 const CELL_SPACING: f32 = 1.0;
 
-/// Cell scale for CP2+ (uniform grid). Chosen so midpoint alpha ≈ 5.6%:
-/// neighbors are clearly distinct rather than merging into fog.
-/// At spacing=1.0: vis_radius=0.699wu, midpoint=0.5wu ≈ 0.72σ from each cell.
+/// Cell scale base for activate_varied_cells.
+/// At spacing=1.0, scale=0.30 gives ~5.6% alpha at the midpoint between neighbors.
 const CELL_SCALE_GRID: f32 = 0.30;
 
-/// Camera pull-back distance for an 8³ grid at spacing=1.0.
-/// 11.0 wu puts the nearest face 7.5wu ahead, giving 25° half-angle in 60° FOV.
-const CAMERA_DISTANCE_8: f32 = 11.0;
+/// Initial camera distance sized for the current GRID.
+/// 16³: grid half-extent 7.5wu, distance 22.0 → 27° half-angle in 60° FOV.
+const CAMERA_DISTANCE: f32 = 22.0;
+
+// ---- App state --------------------------------------------------------------
 
 struct App {
-    window:           Option<Arc<Window>>,
-    rasterizer:       Option<Rasterizer>,
-    camera:           Option<OrbitCamera>,
-    grid:             CellGrid,
-    influencer:       GrayScott,
-    last_frame:       Instant,
-    mouse_pressed:    bool,
-    last_mouse_pos:   Option<(f64, f64)>,
+    window:          Option<Arc<Window>>,
+    rasterizer:      Option<Rasterizer>,
+    camera:          Option<OrbitCamera>,
+    grid:            CellGrid,
+    influencer:      GrayScott,
+    last_frame:      Instant,
+    mouse_pressed:   bool,
+    last_mouse_pos:  Option<(f64, f64)>,
+    // FPS tracking
+    frame_count:     u32,
+    fps_timer:       Instant,
 }
 
 impl App {
@@ -55,7 +63,7 @@ impl App {
         let dims = [GRID, GRID, GRID];
         let mut g = CellGrid::new(dims, CELL_SPACING);
         grid::place_cells(&mut g);
-        grid::activate_all_cells(&mut g, CELL_SCALE_GRID);
+        grid::activate_varied_cells(&mut g, CELL_SCALE_GRID);
 
         Self {
             window:         None,
@@ -66,6 +74,8 @@ impl App {
             last_frame:     Instant::now(),
             mouse_pressed:  false,
             last_mouse_pos: None,
+            frame_count:    0,
+            fps_timer:      Instant::now(),
         }
     }
 
@@ -73,7 +83,6 @@ impl App {
         let now = Instant::now();
         let dt  = (now - self.last_frame).as_secs_f32().min(0.05);
         self.last_frame = now;
-
         self.influencer.step(&mut self.grid, dt);
     }
 }
@@ -81,14 +90,14 @@ impl App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let attrs  = Window::default_attributes()
-            .with_title("myocyte — Tier 2")
+            .with_title("myocyte")
             .with_inner_size(winit::dpi::LogicalSize::new(960, 720));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
         let rasterizer = pollster::block_on(Rasterizer::new(window.clone()));
         let aspect     = rasterizer.config.width as f32 / rasterizer.config.height as f32;
         let mut camera = OrbitCamera::new(aspect);
-        camera.distance = CAMERA_DISTANCE_8;
+        camera.distance = CAMERA_DISTANCE;
 
         self.window     = Some(window);
         self.rasterizer = Some(rasterizer);
@@ -126,8 +135,8 @@ impl ApplicationHandler for App {
 
             WindowEvent::MouseWheel { delta, .. } => {
                 let scroll = match delta {
-                    MouseScrollDelta::LineDelta(_, y)  => y,
-                    MouseScrollDelta::PixelDelta(p)    => (p.y / 100.0) as f32,
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(p)   => (p.y / 100.0) as f32,
                 };
                 if let Some(c) = self.camera.as_mut() { c.zoom(scroll); }
             }
@@ -140,12 +149,11 @@ impl ApplicationHandler for App {
                     self.camera.as_ref(),
                     self.window.as_ref(),
                 ) {
-                    // Project all cells, sort back-to-front, render.
                     let mut projected = preprocess::project_grid(&self.grid, cam);
                     let sorted        = sort::sort_back_to_front(&mut projected);
 
                     match r.render(cam, &sorted) {
-                        Ok(())                                                   => {}
+                        Ok(()) => {}
                         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                             let sz = w.inner_size();
                             r.resize(sz.width, sz.height);
@@ -156,6 +164,20 @@ impl ApplicationHandler for App {
                         }
                         Err(e) => eprintln!("render error: {:?}", e),
                     }
+
+                    // Update window title with fps once per second.
+                    self.frame_count += 1;
+                    let elapsed = self.fps_timer.elapsed().as_secs_f32();
+                    if elapsed >= 1.0 {
+                        let fps = self.frame_count as f32 / elapsed;
+                        w.set_title(&format!(
+                            "myocyte  {:.0} fps  {}³ ({} cells)",
+                            fps, GRID, self.grid.len()
+                        ));
+                        self.frame_count = 0;
+                        self.fps_timer   = Instant::now();
+                    }
+
                     w.request_redraw();
                 }
             }
