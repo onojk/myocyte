@@ -1,0 +1,31 @@
+[package]
+name = "myocyte"
+version = "0.1.0"
+edition = "2021"
+description = "Four soft spheres deformed by invisible surface cursors, crowding each other in 3D space."
+
+[dependencies]
+# GPU abstraction — works on Vulkan, Metal, DX12, WebGPU
+wgpu = "22.1"
+
+# Windowing and event loop. We use winit 0.30's ApplicationHandler API.
+winit = "0.30"
+
+# Math: glam is fast, batteries-included, GPU-buffer friendly via bytemuck.
+glam = { version = "0.29", features = ["bytemuck"] }
+
+# Cast Rust structs to byte slices safely for GPU upload.
+bytemuck = { version = "1.18", features = ["derive", "min_const_generics"] }
+
+# Async runtime (wgpu's setup is async). pollster blocks on a future
+# synchronously, which is exactly what we want for setup code.
+pollster = "0.4"
+
+# Logging — wgpu emits useful debug info on failure.
+env_logger = "0.11"
+log = "0.4"
+
+[profile.release]
+# Whole-program optimization is worth it for a real-time renderer.
+opt-level = 3
+lto = "thin"
