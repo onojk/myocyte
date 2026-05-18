@@ -53,9 +53,10 @@ struct App {
     last_frame:      Instant,
     mouse_pressed:   bool,
     last_mouse_pos:  Option<(f64, f64)>,
-    // FPS tracking
+    // FPS and simulation-time tracking
     frame_count:     u32,
     fps_timer:       Instant,
+    sim_time:        f32,   // accumulated RD simulation time in seconds
 }
 
 impl App {
@@ -76,6 +77,7 @@ impl App {
             last_mouse_pos: None,
             frame_count:    0,
             fps_timer:      Instant::now(),
+            sim_time:       0.0,
         }
     }
 
@@ -84,6 +86,7 @@ impl App {
         let dt  = (now - self.last_frame).as_secs_f32().min(0.05);
         self.last_frame = now;
         self.influencer.step(&mut self.grid, dt);
+        self.sim_time += influencer::gray_scott::DT_RD;
     }
 }
 
@@ -162,17 +165,18 @@ impl ApplicationHandler for App {
                             eprintln!("out of GPU memory");
                             event_loop.exit();
                         }
-                        Err(e) => eprintln!("render error: {:?}", e),
+                        // Timeout is transient (GPU didn't return frame in time); skip silently.
+                        Err(wgpu::SurfaceError::Timeout) => {}
                     }
 
-                    // Update window title with fps once per second.
+                    // Update window title with fps and simulation time once per second.
                     self.frame_count += 1;
                     let elapsed = self.fps_timer.elapsed().as_secs_f32();
                     if elapsed >= 1.0 {
                         let fps = self.frame_count as f32 / elapsed;
                         w.set_title(&format!(
-                            "myocyte  {:.0} fps  {}³ ({} cells)",
-                            fps, GRID, self.grid.len()
+                            "myocyte  {:.0} fps  {}³ ({} cells)  t={:.1}s",
+                            fps, GRID, self.grid.len(), self.sim_time
                         ));
                         self.frame_count = 0;
                         self.fps_timer   = Instant::now();
