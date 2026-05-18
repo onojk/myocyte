@@ -1,14 +1,14 @@
-// main.rs — application entry point.
+// main.rs — application entry point for the Tier 2 myocyte engine.
 //
-// Uses winit 0.30's ApplicationHandler trait. The app holds the renderer and
-// simulation state; the event loop calls our methods on window/redraw/input
-// events.
+// Orchestrates per-frame work: influencer step → project → sort → render.
 
 mod camera;
 mod cell;
-mod crowding;
-mod renderer;
-mod sphere;
+mod grid;
+mod influencer;
+mod preprocess;
+mod rasterizer;
+mod sort;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -19,85 +19,78 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
 use camera::OrbitCamera;
-use cell::{build_cursor_directions, build_initial_cells, Cell};
-use renderer::Renderer;
+use cell::CellGrid;
+use influencer::{gray_scott::GrayScott, Influencer};
+use rasterizer::Rasterizer;
+
+/// Grid dimensions for the current checkpoint.
+/// CP1: 8³ (512 cells, 1 active). Increase to 16 or 32 after CP6.
+const GRID: u32 = 8;
+
+/// Center-to-center spacing between cells in world units.
+const CELL_SPACING: f32 = 1.0;
 
 struct App {
-    window: Option<Arc<Window>>,
-    renderer: Option<Renderer>,
-    camera: Option<OrbitCamera>,
-    cells: Vec<Cell>,
-    cursor_dirs: Vec<glam::Vec3>,
-    start_time: Instant,
-    last_frame_time: Instant,
-    mouse_pressed: bool,
-    last_mouse_pos: Option<(f64, f64)>,
+    window:           Option<Arc<Window>>,
+    rasterizer:       Option<Rasterizer>,
+    camera:           Option<OrbitCamera>,
+    grid:             CellGrid,
+    influencer:       GrayScott,
+    last_frame:       Instant,
+    mouse_pressed:    bool,
+    last_mouse_pos:   Option<(f64, f64)>,
 }
 
 impl App {
     fn new() -> Self {
+        let dims = [GRID, GRID, GRID];
+        let mut g = CellGrid::new(dims, CELL_SPACING);
+        grid::place_cells(&mut g);
+        grid::activate_center_cell(&mut g);
+
         Self {
-            window: None,
-            renderer: None,
-            camera: None,
-            cells: build_initial_cells(),
-            cursor_dirs: build_cursor_directions(),
-            start_time: Instant::now(),
-            last_frame_time: Instant::now(),
-            mouse_pressed: false,
+            window:         None,
+            rasterizer:     None,
+            camera:         None,
+            grid:           g,
+            influencer:     GrayScott::new(dims),
+            last_frame:     Instant::now(),
+            mouse_pressed:  false,
             last_mouse_pos: None,
         }
     }
 
     fn update(&mut self) {
         let now = Instant::now();
-        let dt = (now - self.last_frame_time).as_secs_f32().min(0.05);
-        self.last_frame_time = now;
-        let t = (now - self.start_time).as_secs_f32();
+        let dt  = (now - self.last_frame).as_secs_f32().min(0.05);
+        self.last_frame = now;
 
-        // Per-cell scripts: animate each cell's cursor strengths.
-        for cell in &mut self.cells {
-            cell.update_script(&self.cursor_dirs, t);
-        }
-
-        // Inter-cell crowding physics.
-        crowding::step(&mut self.cells, &self.cursor_dirs, dt);
-
-        // Integrate positions (center motion from crowding, damped).
-        for cell in &mut self.cells {
-            cell.integrate(dt);
-        }
+        self.influencer.step(&mut self.grid, dt);
     }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        // Called once at startup (and on Android resume, irrelevant on desktop).
-        let attrs = Window::default_attributes()
-            .with_title("myocyte — four cells in space")
+        let attrs  = Window::default_attributes()
+            .with_title("myocyte — Tier 2")
             .with_inner_size(winit::dpi::LogicalSize::new(960, 720));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
-        let renderer = pollster::block_on(Renderer::new(window.clone(), &self.cursor_dirs));
-        let aspect = renderer.config.width as f32 / renderer.config.height as f32;
-        let camera = OrbitCamera::new(aspect);
+        let rasterizer = pollster::block_on(Rasterizer::new(window.clone()));
+        let aspect     = rasterizer.config.width as f32 / rasterizer.config.height as f32;
+        let camera     = OrbitCamera::new(aspect);
 
-        self.window = Some(window);
-        self.renderer = Some(renderer);
-        self.camera = Some(camera);
+        self.window     = Some(window);
+        self.rasterizer = Some(rasterizer);
+        self.camera     = Some(camera);
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
 
             WindowEvent::Resized(size) => {
-                if let (Some(r), Some(c)) = (self.renderer.as_mut(), self.camera.as_mut()) {
+                if let (Some(r), Some(c)) = (self.rasterizer.as_mut(), self.camera.as_mut()) {
                     r.resize(size.width, size.height);
                     c.set_aspect(size.width as f32 / size.height.max(1) as f32);
                 }
@@ -106,19 +99,15 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { state, button, .. } => {
                 if button == MouseButton::Left {
                     self.mouse_pressed = state == ElementState::Pressed;
-                    if !self.mouse_pressed {
-                        self.last_mouse_pos = None;
-                    }
+                    if !self.mouse_pressed { self.last_mouse_pos = None; }
                 }
             }
 
             WindowEvent::CursorMoved { position, .. } => {
                 if self.mouse_pressed {
                     if let Some((lx, ly)) = self.last_mouse_pos {
-                        let dx = (position.x - lx) as f32;
-                        let dy = (position.y - ly) as f32;
                         if let Some(c) = self.camera.as_mut() {
-                            c.orbit(dx, dy);
+                            c.orbit((position.x - lx) as f32, (position.y - ly) as f32);
                         }
                     }
                     self.last_mouse_pos = Some((position.x, position.y));
@@ -127,25 +116,29 @@ impl ApplicationHandler for App {
 
             WindowEvent::MouseWheel { delta, .. } => {
                 let scroll = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(p) => (p.y / 100.0) as f32,
+                    MouseScrollDelta::LineDelta(_, y)  => y,
+                    MouseScrollDelta::PixelDelta(p)    => (p.y / 100.0) as f32,
                 };
-                if let Some(c) = self.camera.as_mut() {
-                    c.zoom(scroll);
-                }
+                if let Some(c) = self.camera.as_mut() { c.zoom(scroll); }
             }
 
             WindowEvent::RedrawRequested => {
                 self.update();
-                if let (Some(r), Some(c), Some(w)) =
-                    (self.renderer.as_mut(), self.camera.as_ref(), self.window.as_ref())
-                {
-                    match r.render(c, &self.cells) {
-                        Ok(()) => {}
-                        // Surface lost — recreate at current size.
-                        Err(wgpu::SurfaceError::Lost) | Err(wgpu::SurfaceError::Outdated) => {
-                            let size = w.inner_size();
-                            r.resize(size.width, size.height);
+
+                if let (Some(r), Some(cam), Some(w)) = (
+                    self.rasterizer.as_mut(),
+                    self.camera.as_ref(),
+                    self.window.as_ref(),
+                ) {
+                    // Project all cells, sort back-to-front, render.
+                    let mut projected = preprocess::project_grid(&self.grid, cam);
+                    let sorted        = sort::sort_back_to_front(&mut projected);
+
+                    match r.render(cam, &sorted) {
+                        Ok(())                                                   => {}
+                        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                            let sz = w.inner_size();
+                            r.resize(sz.width, sz.height);
                         }
                         Err(wgpu::SurfaceError::OutOfMemory) => {
                             eprintln!("out of GPU memory");
@@ -153,7 +146,6 @@ impl ApplicationHandler for App {
                         }
                         Err(e) => eprintln!("render error: {:?}", e),
                     }
-                    // Request the next frame.
                     w.request_redraw();
                 }
             }
@@ -164,9 +156,11 @@ impl ApplicationHandler for App {
 }
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("warn")
+    ).init();
+
     let event_loop = EventLoop::new().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App::new();
-    event_loop.run_app(&mut app).expect("run app");
+    event_loop.run_app(&mut App::new()).expect("run app");
 }

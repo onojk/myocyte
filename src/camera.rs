@@ -40,10 +40,16 @@ impl OrbitCamera {
         self.target + Vec3::new(x, y, z)
     }
 
+    pub fn view(&self) -> Mat4 {
+        Mat4::look_at_rh(self.eye(), self.target, Vec3::Y)
+    }
+
+    pub fn proj(&self) -> Mat4 {
+        Mat4::perspective_rh(self.fov_y, self.aspect, self.z_near, self.z_far)
+    }
+
     pub fn view_proj(&self) -> Mat4 {
-        let proj = Mat4::perspective_rh(self.fov_y, self.aspect, self.z_near, self.z_far);
-        let view = Mat4::look_at_rh(self.eye(), self.target, Vec3::Y);
-        proj * view
+        self.proj() * self.view()
     }
 
     pub fn orbit(&mut self, dx: f32, dy: f32) {
