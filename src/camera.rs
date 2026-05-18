@@ -60,10 +60,29 @@ impl OrbitCamera {
         self.elevation = self.elevation.clamp(-limit, limit);
     }
 
+    /// Keyboard-driven orbit: d_az and d_el are already scaled by dt and rate.
+    pub fn orbit_keyboard(&mut self, d_az: f32, d_el: f32) {
+        self.azimuth += d_az;
+        let limit = std::f32::consts::FRAC_PI_2 - 0.05;
+        self.elevation = (self.elevation + d_el).clamp(-limit, limit);
+    }
+
     pub fn zoom(&mut self, delta: f32) {
         // Multiplicative zoom feels right — closer = smaller steps.
         self.distance *= (1.0 - delta * 0.1).clamp(0.5, 2.0);
         self.distance = self.distance.clamp(0.8, 30.0);
+    }
+
+    /// Keyboard-driven zoom: factor > 1 moves away, factor < 1 moves closer.
+    pub fn zoom_keyboard(&mut self, factor: f32) {
+        self.distance = (self.distance * factor).clamp(0.8, 30.0);
+    }
+
+    /// Reset to default orbit angles, preserving the current aspect ratio.
+    pub fn reset(&mut self, distance: f32) {
+        self.azimuth   = 0.5;
+        self.elevation = 0.3;
+        self.distance  = distance;
     }
 
     pub fn set_aspect(&mut self, aspect: f32) {

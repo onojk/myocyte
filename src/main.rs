@@ -16,6 +16,7 @@ use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use camera::OrbitCamera;
@@ -46,6 +47,26 @@ const CELL_SCALE_GRID: f32 = 0.30;
 /// 16³: grid half-extent 7.5wu, distance 22.0 → 27° half-angle in 60° FOV.
 const CAMERA_DISTANCE: f32 = 22.0;
 
+/// Keyboard orbit speed in radians per second (W/S/A/D and arrow keys).
+const ORBIT_RATE: f32 = 1.0;
+
+/// Keyboard zoom speed as a fractional distance change per second (Q/E).
+/// Each second of holding Q: distance *= 1.05. Holding E: distance *= 0.95.
+const ZOOM_RATE:  f32 = 0.05;
+
+// ---- Keyboard state ---------------------------------------------------------
+
+/// Which motion keys are currently held. Updated on press/release events.
+#[derive(Default)]
+struct Keys {
+    up:       bool,  // W / ArrowUp   — tilt elevation up
+    down:     bool,  // S / ArrowDown — tilt elevation down
+    left:     bool,  // A / ArrowLeft  — orbit azimuth left
+    right:    bool,  // D / ArrowRight — orbit azimuth right
+    zoom_out: bool,  // Q — move camera back
+    zoom_in:  bool,  // E — move camera forward
+}
+
 // ---- App state --------------------------------------------------------------
 
 struct App {
@@ -58,6 +79,8 @@ struct App {
     last_frame:      Instant,
     mouse_pressed:   bool,
     last_mouse_pos:  Option<(f64, f64)>,
+    keys:            Keys,
+    paused:          bool,
     // FPS and simulation-time tracking
     frame_count:     u32,
     fps_timer:       Instant,
@@ -88,6 +111,8 @@ impl App {
             last_frame:     Instant::now(),
             mouse_pressed:  false,
             last_mouse_pos: None,
+            keys:           Keys::default(),
+            paused:         false,
             frame_count:    0,
             fps_timer:      Instant::now(),
             sim_time:       0.0,
@@ -98,9 +123,26 @@ impl App {
         let now = Instant::now();
         let dt  = (now - self.last_frame).as_secs_f32().min(0.05);
         self.last_frame = now;
-        self.influencer.step(&mut self.grid, dt);
-        if self.mode == "rd" {
-            self.sim_time += influencer::gray_scott::DT_RD;
+
+        // Keyboard camera motion — runs regardless of pause state.
+        if let Some(cam) = self.camera.as_mut() {
+            let mut d_az = 0.0_f32;
+            let mut d_el = 0.0_f32;
+            if self.keys.left     { d_az += ORBIT_RATE * dt; }
+            if self.keys.right    { d_az -= ORBIT_RATE * dt; }
+            if self.keys.up       { d_el += ORBIT_RATE * dt; }
+            if self.keys.down     { d_el -= ORBIT_RATE * dt; }
+            if d_az != 0.0 || d_el != 0.0 { cam.orbit_keyboard(d_az, d_el); }
+            if self.keys.zoom_out { cam.zoom_keyboard(1.0 + ZOOM_RATE * dt); }
+            if self.keys.zoom_in  { cam.zoom_keyboard(1.0 - ZOOM_RATE * dt); }
+        }
+
+        // Influencer step — skipped while paused.
+        if !self.paused {
+            self.influencer.step(&mut self.grid, dt);
+            if self.mode == "rd" {
+                self.sim_time += influencer::gray_scott::DT_RD;
+            }
         }
     }
 }
@@ -135,6 +177,30 @@ impl ApplicationHandler for App {
                 if let (Some(r), Some(c)) = (self.rasterizer.as_mut(), self.camera.as_mut()) {
                     r.resize(size.width, size.height);
                     c.set_aspect(size.width as f32 / size.height.max(1) as f32);
+                }
+            }
+
+            WindowEvent::KeyboardInput { event, .. } => {
+                let pressed = event.state == ElementState::Pressed;
+                if let PhysicalKey::Code(code) = event.physical_key {
+                    match code {
+                        KeyCode::KeyW | KeyCode::ArrowUp    => self.keys.up       = pressed,
+                        KeyCode::KeyS | KeyCode::ArrowDown  => self.keys.down     = pressed,
+                        KeyCode::KeyA | KeyCode::ArrowLeft  => self.keys.left     = pressed,
+                        KeyCode::KeyD | KeyCode::ArrowRight => self.keys.right    = pressed,
+                        KeyCode::KeyQ                       => self.keys.zoom_out = pressed,
+                        KeyCode::KeyE                       => self.keys.zoom_in  = pressed,
+                        // R and Space act on initial press only (not on key repeat).
+                        KeyCode::KeyR if pressed && !event.repeat => {
+                            if let Some(cam) = self.camera.as_mut() {
+                                cam.reset(CAMERA_DISTANCE);
+                            }
+                        }
+                        KeyCode::Space if pressed && !event.repeat => {
+                            self.paused = !self.paused;
+                        }
+                        _ => {}
+                    }
                 }
             }
 
@@ -193,13 +259,14 @@ impl ApplicationHandler for App {
                     self.frame_count += 1;
                     let elapsed = self.fps_timer.elapsed().as_secs_f32();
                     if elapsed >= 1.0 {
-                        let fps   = self.frame_count as f32 / elapsed;
-                        let title = if self.mode == "rd" {
-                            format!("myocyte  {:.0} fps  {}³ ({} cells)  t={:.1}s",
-                                fps, GRID, self.grid.len(), self.sim_time)
+                        let fps    = self.frame_count as f32 / elapsed;
+                        let paused = if self.paused { "  [paused]" } else { "" };
+                        let title  = if self.mode == "rd" {
+                            format!("myocyte  {:.0} fps  {}³ ({} cells)  t={:.1}s{}",
+                                fps, GRID, self.grid.len(), self.sim_time, paused)
                         } else {
-                            format!("myocyte  {:.0} fps  {}³ ({} cells)  {}",
-                                fps, GRID, self.grid.len(), self.mode)
+                            format!("myocyte  {:.0} fps  {}³ ({} cells)  {}{}",
+                                fps, GRID, self.grid.len(), self.mode, paused)
                         };
                         w.set_title(&title);
                         self.frame_count = 0;
