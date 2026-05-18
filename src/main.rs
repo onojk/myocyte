@@ -24,11 +24,20 @@ use influencer::{gray_scott::GrayScott, Influencer};
 use rasterizer::Rasterizer;
 
 /// Grid dimensions for the current checkpoint.
-/// CP1: 8³ (512 cells, 1 active). Increase to 16 or 32 after CP6.
+/// CP1: 8³ (512 cells, 1 active). CP2+: 8³ all active. 16³ and 32³ after CP6.
 const GRID: u32 = 8;
 
 /// Center-to-center spacing between cells in world units.
 const CELL_SPACING: f32 = 1.0;
+
+/// Cell scale for CP2+ (uniform grid). Chosen so midpoint alpha ≈ 5.6%:
+/// neighbors are clearly distinct rather than merging into fog.
+/// At spacing=1.0: vis_radius=0.699wu, midpoint=0.5wu ≈ 0.72σ from each cell.
+const CELL_SCALE_GRID: f32 = 0.30;
+
+/// Camera pull-back distance for an 8³ grid at spacing=1.0.
+/// 11.0 wu puts the nearest face 7.5wu ahead, giving 25° half-angle in 60° FOV.
+const CAMERA_DISTANCE_8: f32 = 11.0;
 
 struct App {
     window:           Option<Arc<Window>>,
@@ -46,7 +55,7 @@ impl App {
         let dims = [GRID, GRID, GRID];
         let mut g = CellGrid::new(dims, CELL_SPACING);
         grid::place_cells(&mut g);
-        grid::activate_center_cell(&mut g);
+        grid::activate_all_cells(&mut g, CELL_SCALE_GRID);
 
         Self {
             window:         None,
@@ -78,7 +87,8 @@ impl ApplicationHandler for App {
 
         let rasterizer = pollster::block_on(Rasterizer::new(window.clone()));
         let aspect     = rasterizer.config.width as f32 / rasterizer.config.height as f32;
-        let camera     = OrbitCamera::new(aspect);
+        let mut camera = OrbitCamera::new(aspect);
+        camera.distance = CAMERA_DISTANCE_8;
 
         self.window     = Some(window);
         self.rasterizer = Some(rasterizer);
