@@ -4,6 +4,7 @@
 // CellGrid. Tier 2 ships with Gray-Scott (gray_scott.rs). Other influencers
 // (audio FFT, scripted keyframes) can be added without changing the trait.
 
+pub mod authored;
 pub mod gray_scott;
 
 use crate::cell::CellGrid;

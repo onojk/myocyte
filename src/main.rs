@@ -20,7 +20,11 @@ use winit::window::{Window, WindowId};
 
 use camera::OrbitCamera;
 use cell::CellGrid;
-use influencer::{gray_scott::GrayScott, Influencer};
+use influencer::{
+    authored::{Authored, AuthoredShape},
+    gray_scott::GrayScott,
+    Influencer,
+};
 use rasterizer::Rasterizer;
 
 // ---- Checkpoint constants ---------------------------------------------------
@@ -49,29 +53,38 @@ struct App {
     rasterizer:      Option<Rasterizer>,
     camera:          Option<OrbitCamera>,
     grid:            CellGrid,
-    influencer:      GrayScott,
+    influencer:      Box<dyn Influencer>,
+    mode:            &'static str,   // "rd" | "sphere" | "shell" | "letter-a"
     last_frame:      Instant,
     mouse_pressed:   bool,
     last_mouse_pos:  Option<(f64, f64)>,
     // FPS and simulation-time tracking
     frame_count:     u32,
     fps_timer:       Instant,
-    sim_time:        f32,   // accumulated RD simulation time in seconds
+    sim_time:        f32,   // accumulated RD simulation time; unused for authored modes
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(shape: Option<&str>) -> Self {
         let dims = [GRID, GRID, GRID];
         let mut g = CellGrid::new(dims, CELL_SPACING);
         grid::place_cells(&mut g);
         grid::activate_varied_cells(&mut g, CELL_SCALE_GRID);
+
+        let (influencer, mode): (Box<dyn Influencer>, &'static str) = match shape {
+            Some("sphere")   => (Box::new(Authored::new(AuthoredShape::Sphere)),  "sphere"),
+            Some("shell")    => (Box::new(Authored::new(AuthoredShape::Shell)),   "shell"),
+            Some("a") | Some("letter-a") => (Box::new(Authored::new(AuthoredShape::LetterA)), "letter-a"),
+            _                => (Box::new(GrayScott::new(dims)),                  "rd"),
+        };
 
         Self {
             window:         None,
             rasterizer:     None,
             camera:         None,
             grid:           g,
-            influencer:     GrayScott::new(dims),
+            influencer,
+            mode,
             last_frame:     Instant::now(),
             mouse_pressed:  false,
             last_mouse_pos: None,
@@ -86,7 +99,9 @@ impl App {
         let dt  = (now - self.last_frame).as_secs_f32().min(0.05);
         self.last_frame = now;
         self.influencer.step(&mut self.grid, dt);
-        self.sim_time += influencer::gray_scott::DT_RD;
+        if self.mode == "rd" {
+            self.sim_time += influencer::gray_scott::DT_RD;
+        }
     }
 }
 
@@ -101,6 +116,11 @@ impl ApplicationHandler for App {
         let aspect     = rasterizer.config.width as f32 / rasterizer.config.height as f32;
         let mut camera = OrbitCamera::new(aspect);
         camera.distance = CAMERA_DISTANCE;
+        // letter-a: start face-on for legibility; other modes use default orbit angle.
+        if self.mode == "letter-a" {
+            camera.azimuth   = 0.0;
+            camera.elevation = 0.0;
+        }
 
         self.window     = Some(window);
         self.rasterizer = Some(rasterizer);
@@ -169,15 +189,19 @@ impl ApplicationHandler for App {
                         Err(wgpu::SurfaceError::Timeout) => {}
                     }
 
-                    // Update window title with fps and simulation time once per second.
+                    // Update window title with fps once per second.
                     self.frame_count += 1;
                     let elapsed = self.fps_timer.elapsed().as_secs_f32();
                     if elapsed >= 1.0 {
-                        let fps = self.frame_count as f32 / elapsed;
-                        w.set_title(&format!(
-                            "myocyte  {:.0} fps  {}³ ({} cells)  t={:.1}s",
-                            fps, GRID, self.grid.len(), self.sim_time
-                        ));
+                        let fps   = self.frame_count as f32 / elapsed;
+                        let title = if self.mode == "rd" {
+                            format!("myocyte  {:.0} fps  {}³ ({} cells)  t={:.1}s",
+                                fps, GRID, self.grid.len(), self.sim_time)
+                        } else {
+                            format!("myocyte  {:.0} fps  {}³ ({} cells)  {}",
+                                fps, GRID, self.grid.len(), self.mode)
+                        };
+                        w.set_title(&title);
                         self.frame_count = 0;
                         self.fps_timer   = Instant::now();
                     }
@@ -196,7 +220,12 @@ fn main() {
         env_logger::Env::default().default_filter_or("warn")
     ).init();
 
+    // Optional: --shape=sphere | shell | a | letter-a
+    // Default (no flag): Gray-Scott reaction-diffusion.
+    let shape = std::env::args()
+        .find_map(|a| a.strip_prefix("--shape=").map(str::to_owned));
+
     let event_loop = EventLoop::new().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
-    event_loop.run_app(&mut App::new()).expect("run app");
+    event_loop.run_app(&mut App::new(shape.as_deref())).expect("run app");
 }
